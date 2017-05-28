@@ -10,6 +10,7 @@ package qsvc
 import (
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/streadway/amqp"
 )
@@ -31,7 +32,7 @@ func New(connString string) queueService {
 	}
 }
 
-func (qs queueService) Subscribe(queueName string) <-chan []byte {
+func (qs queueService) Subscribe(queueName string, processor MessageProcessor) {
 
 	log.Println("Attempting to start service")
 
@@ -64,22 +65,16 @@ func (qs queueService) Subscribe(queueName string) <-chan []byte {
 	)
 	failOnError(err, "Failed to register a consumer")
 
-	//forever := make(chan bool)
-
-	message := make(chan []byte)
-
 	for delivery := range deliveryChannel {
 		go func(delivery amqp.Delivery) {
-			//processor.Process(message.Body)
-			message <- delivery.Body
+			startTime := time.Now()
+			processor.Process(delivery.Body)
+			log.Printf("Finished processing message in %d milliseconds.", (time.Since(startTime).Nanoseconds() / int64(1000000)))
+			delivery.Ack(false)
 		}(delivery)
 	}
 
 	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
-
-	//<-forever
-
-	return message
 }
 
 func Publish(routingKey string) {
