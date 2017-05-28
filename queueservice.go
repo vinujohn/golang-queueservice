@@ -2,6 +2,7 @@
 1) Fail messages on redelivery option
 2) How to log to a file system
 3) How to handle routing keys
+4) Logging time
 */
 
 package qsvc
@@ -17,14 +18,20 @@ type queueService struct {
 	connString string
 }
 
-func NewQueueService(connString string) queueService {
+type MessageProcessor interface {
+	Process(b []byte)
+}
+
+func New(connString string) queueService {
+
+	//conn, err := amqp.Dial(connString)
 
 	return queueService{
 		connString: connString,
 	}
 }
 
-func (qs queueService) Receive(queueName string, messageReceivedHandler func(b []byte)) {
+func (qs queueService) Subscribe(queueName string) <-chan []byte {
 
 	log.Println("Attempting to start service")
 
@@ -46,9 +53,9 @@ func (qs queueService) Receive(queueName string, messageReceivedHandler func(b [
 	)
 	failOnError(err, "Failed to declare a queue")
 
-	messages, err := ch.Consume(
+	deliveryChannel, err := ch.Consume(
 		q.Name, // queue
-		"",     // consumer
+		"test", // consumer
 		false,  // auto-ack
 		false,  // exclusive
 		false,  // no-local
@@ -57,19 +64,28 @@ func (qs queueService) Receive(queueName string, messageReceivedHandler func(b [
 	)
 	failOnError(err, "Failed to register a consumer")
 
-	forever := make(chan bool)
+	//forever := make(chan bool)
 
-	for message := range messages {
-		go func(message amqp.Delivery) {
-			messageReceivedHandler(message.Body)
-			message.Ack(false)
-		}(message)
+	message := make(chan []byte)
+
+	for delivery := range deliveryChannel {
+		go func(delivery amqp.Delivery) {
+			//processor.Process(message.Body)
+			message <- delivery.Body
+		}(delivery)
 	}
 
 	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
 
-	<-forever
+	//<-forever
+
+	return message
 }
+
+func Publish(routingKey string) {
+
+}
+
 func failOnError(err error, msg string) {
 	if err != nil {
 		log.Fatalf("%s: %s", msg, err)
