@@ -1,8 +1,6 @@
 /* Things to think about
 1) Fail messages on redelivery option
-2) How to log to a file system
-3) How to handle routing keys
-4) Logging time
+5) TLS
 */
 
 package qsvc
@@ -15,36 +13,76 @@ import (
 	"github.com/streadway/amqp"
 )
 
-type queueService struct {
-	connString string
+type QueueService struct {
+	connection      *amqp.Connection
+	inboundChannel  *amqp.Channel
+	outboundChannel *amqp.Channel
 }
 
+//MessageProcessor represents a type that can be used to process messages
+//from an open inbound connection
 type MessageProcessor interface {
 	Process(b []byte)
 }
 
-func New(connString string) queueService {
+//New creates a new queue service with an open TCP connection to rabbit
+//with an inbound and outbound channel.
+func New(connectionString string) QueueService {
 
-	//conn, err := amqp.Dial(connString)
+	connection := createConnection(connectionString)
 
-	return queueService{
-		connString: connString,
+	return QueueService{
+		connection:      connection,
+		inboundChannel:  createChannel(connection),
+		outboundChannel: createChannel(connection),
 	}
 }
 
-func (qs queueService) Subscribe(queueName string, processor MessageProcessor) {
+func createConnection(uri string) *amqp.Connection {
+	conn, err := amqp.Dial(uri)
+	failOnError(err, "Could not make a connection to rabbit.")
+	connectionCloseError := make(chan *amqp.Error)
+	conn.NotifyClose(connectionCloseError)
 
-	log.Println("Attempting to start service")
+	go func() {
+		for {
+			rabbitErr := <-connectionCloseError
+			if rabbitErr != nil {
+				log.Println("Connection to rabbit has been lost!")
+				panic(rabbitErr)
+			}
+		}
+	}()
+	return conn
+}
 
-	conn, err := amqp.Dial(qs.connString)
-	failOnError(err, "Could not make a connection")
-	defer conn.Close()
-
-	ch, err := conn.Channel()
+func createChannel(connection *amqp.Connection) *amqp.Channel {
+	channel, err := connection.Channel()
 	failOnError(err, "Could not open a channel")
-	defer ch.Close()
+	channelCloseError := make(chan *amqp.Error)
+	channel.NotifyClose(channelCloseError)
 
-	q, err := ch.QueueDeclare(
+	go func() {
+		for {
+			rabbitErr := <-channelCloseError
+			if rabbitErr != nil {
+				log.Println("Channel has been lost. Closing connection...!")
+				connection.Close()
+				panic(rabbitErr)
+			}
+		}
+	}()
+
+	return channel
+}
+
+//Subscribe attaches a subscriber to an inbound channel and uses the passed in
+//MessageProcessor to
+func (qs *QueueService) Subscribe(queueName string, processor MessageProcessor) {
+
+	log.Printf("Attempting to subscribe to queue with name %s\n", queueName)
+
+	q, err := qs.inboundChannel.QueueDeclare(
 		queueName, // name
 		false,     // durable
 		false,     // delete when usused
@@ -54,7 +92,7 @@ func (qs queueService) Subscribe(queueName string, processor MessageProcessor) {
 	)
 	failOnError(err, "Failed to declare a queue")
 
-	deliveryChannel, err := ch.Consume(
+	incoming, err := qs.inboundChannel.Consume(
 		q.Name, // queue
 		"test", // consumer
 		false,  // auto-ack
@@ -65,20 +103,36 @@ func (qs queueService) Subscribe(queueName string, processor MessageProcessor) {
 	)
 	failOnError(err, "Failed to register a consumer")
 
-	for delivery := range deliveryChannel {
+	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
+
+	for delivery := range incoming {
 		go func(delivery amqp.Delivery) {
+			defer func() {
+				if r := recover(); r != nil {
+					log.Println("Error encountered when processing message: ", r)
+					delivery.Reject(false)
+				}
+			}()
+
 			startTime := time.Now()
 			processor.Process(delivery.Body)
 			log.Printf("Finished processing message in %d milliseconds.", (time.Since(startTime).Nanoseconds() / int64(1000000)))
 			delivery.Ack(false)
 		}(delivery)
 	}
-
-	log.Printf(" [*] Waiting for messages. To exit press CTRL+C")
 }
 
-func Publish(routingKey string) {
-
+func (qs *QueueService) Publish(routingKey string, message []byte) {
+	qs.outboundChannel.Publish(
+		"",
+		routingKey,
+		false,
+		false,
+		amqp.Publishing{
+			ContentType: "text/plain",
+			Body:        []byte(message),
+		},
+	)
 }
 
 func failOnError(err error, msg string) {
